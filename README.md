@@ -115,7 +115,7 @@ Flags with env fallback, no config lib:
 -listen     127.0.0.1:7373   SHOKOD_LISTEN
 -shoko      http://poco:8111 SHOKO_URL
 -shoko-key                   SHOKO_APIKEY     (from POST /api/auth once, see `shokod login`)
--watched-at 85               SHOKOD_WATCHED_AT
+-watched-at 85               (flag only)
 -sp-host    syncplay.pl:8997 SYNCPLAY_HOST
 -sp-room                     SYNCPLAY_ROOM
 -sp-name                     SYNCPLAY_NAME

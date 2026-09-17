@@ -1,19 +1,25 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 func env(key, def string) string {
@@ -24,13 +30,14 @@ func env(key, def string) string {
 }
 
 var (
-	listen   = flag.String("listen", env("SHOKOD_LISTEN", "127.0.0.1:7373"), "listen address")
-	shokoURL = flag.String("shoko", env("SHOKO_URL", "http://127.0.0.1:8111"), "Shoko Server URL")
-	shokoKey = flag.String("shoko-key", env("SHOKO_APIKEY", ""), "Shoko API key")
-	spHost   = flag.String("sp-host", env("SYNCPLAY_HOST", ""), "syncplay host:port (default: syncplay.ini)")
-	spRoom   = flag.String("sp-room", env("SYNCPLAY_ROOM", ""), "syncplay room (default: syncplay.ini)")
-	spName   = flag.String("sp-name", env("SYNCPLAY_NAME", ""), "syncplay username (default: syncplay.ini)")
-	runDir   = env("XDG_RUNTIME_DIR", os.TempDir())
+	listen    = flag.String("listen", env("SHOKOD_LISTEN", "127.0.0.1:7373"), "listen address")
+	shokoURL  = flag.String("shoko", env("SHOKO_URL", "http://127.0.0.1:8111"), "Shoko Server URL")
+	shokoKey  = flag.String("shoko-key", env("SHOKO_APIKEY", ""), "Shoko API key")
+	spHost    = flag.String("sp-host", env("SYNCPLAY_HOST", ""), "syncplay host:port (default: syncplay.ini)")
+	spRoom    = flag.String("sp-room", env("SYNCPLAY_ROOM", ""), "syncplay room (default: syncplay.ini)")
+	spName    = flag.String("sp-name", env("SYNCPLAY_NAME", ""), "syncplay username (default: syncplay.ini)")
+	watchedAt = flag.Float64("watched-at", 85, "mark watched in Shoko at this percent-pos")
+	runDir    = env("XDG_RUNTIME_DIR", os.TempDir())
 )
 
 type episode struct {
@@ -133,6 +140,68 @@ func launch(entries []string) error {
 	return spCmd.Start()
 }
 
+// mpv JSON IPC: one request at a time over a single connection, events are skipped.
+func mpvGet(c net.Conn, prop string) (any, error) {
+	if _, err := fmt.Fprintf(c, `{"command":["get_property",%q]}`+"\n", prop); err != nil {
+		return nil, err
+	}
+	sc := bufio.NewScanner(c)
+	for sc.Scan() {
+		var res struct {
+			Data  any    `json:"data"`
+			Error string `json:"error"`
+			Event string `json:"event"`
+		}
+		if json.Unmarshal(sc.Bytes(), &res) != nil || res.Event != "" {
+			continue
+		}
+		if res.Error != "success" {
+			return nil, errors.New(res.Error)
+		}
+		return res.Data, nil
+	}
+	return nil, io.EOF
+}
+
+var streamRe = regexp.MustCompile(`/stream/(\d+)/`)
+
+func markWatched(fileID string) {
+	req, _ := http.NewRequest("POST", *shokoURL+"/api/v3/File/"+fileID+"/Watched/true", nil)
+	req.Header.Set("apikey", *shokoKey)
+	res, err := http.DefaultClient.Do(req)
+	if err == nil {
+		res.Body.Close()
+		err = fmt.Errorf("%s", res.Status)
+	}
+	log.Printf("watched file %s: %v", fileID, err)
+}
+
+func watchMpv() {
+	sock := filepath.Join(runDir, "shokod-mpv.sock")
+	marked := map[string]bool{}
+	for {
+		time.Sleep(5 * time.Second)
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			continue
+		}
+		for {
+			path, err := mpvGet(c, "path")
+			if err != nil {
+				break
+			}
+			pct, _ := mpvGet(c, "percent-pos")
+			m := streamRe.FindStringSubmatch(fmt.Sprint(path))
+			if p, ok := pct.(float64); ok && m != nil && p >= *watchedAt && !marked[m[1]] {
+				marked[m[1]] = true
+				markWatched(m[1])
+			}
+			time.Sleep(5 * time.Second)
+		}
+		c.Close()
+	}
+}
+
 func main() {
 	flag.Parse()
 	if *shokoKey == "" {
@@ -196,6 +265,7 @@ func main() {
 		fmt.Fprintf(w, "launched %d entries\n", len(entries))
 	})
 
+	go watchMpv()
 	log.Printf("shokod on %s -> %s", *listen, *shokoURL)
 	log.Fatal(http.ListenAndServe(*listen, mux))
 }
