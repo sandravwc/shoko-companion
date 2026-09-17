@@ -41,7 +41,7 @@ HTTP API only. No mounts, no path mapping.
 
 ```
 cmd/shokod/main.go          everything daemon-side, one file until it hurts
-userscript/shoko-play-in-mpv.user.js
+userscript/shoko-syncplay.user.js
 Makefile                    static builds: linux/amd64, linux/arm64, windows/amd64
 ```
 
@@ -71,14 +71,16 @@ Makefile                    static builds: linux/amd64, linux/arm64, windows/amd
   on name/size/duration mismatch. Auto-advance won't work for them (127.0.0.1
   URL is unplayable on their box). Accepted.
 - Solo watching = room of one. No separate mpv-only path.
-- Syncplay config needs `127.0.0.1` in `trustedDomains` so it opens the proxy
-  URLs without prompting. Daemon prints the ini snippet on first run.
+- Syncplay config needs `127.0.0.1` in `trustedDomains` (syncplay.ini) so it
+  auto-advances to the proxy URLs without prompting.
 
 ### 2. WebUI userscript
 
-`userscript/shoko-play-in-mpv.user.js` (Violentmonkey/Tampermonkey).
-Two small buttons per episode row in Shoko WebUI: "ep", "series" ->
-`fetch('http://127.0.0.1:7373/syncplay?episode=<id>&mode=...')`.
+`userscript/shoko-syncplay.user.js` (Violentmonkey/Tampermonkey; edit `@match`
+to your Shoko URL). Floating panel bottom-right on `/series/<id>` pages, built
+from `GET /episodes?series=<id>` (daemon does the Shoko call, so no WebUI DOM
+or apikey dependency). "ep"/"series" buttons -> `/syncplay?episode=<id>&mode=`.
+Verified in Firefox.
 Daemon answers CORS `Access-Control-Allow-Origin: <SHOKO_URL origin>`.
 Chrome Private Network Access may need
 `chrome://flags/#block-insecure-private-network-requests` off; Firefox fine.
@@ -87,25 +89,28 @@ Chrome Private Network Access may need
 
 - Every 5s over mpv IPC: `get_property path` + `percent-pos`. Path tells which
   fileID is playing (parsed from the proxy URL), so playlist advance is free.
-- `percent-pos >= 85` (flag `-watched-at`) -> `POST /api/v3/File/<id>/Watched?watched=true`
-  once per file. Emits event to AniList module.
+- `percent-pos >= 85` (flag `-watched-at`) -> `POST /api/v3/File/<id>/Watched/true`
+  once per file (path param; `?watched=` is silently ignored by Shoko). Then
+  AniList sync for that series.
 - v2 (skip): `File/<id>/Scrobble` for resume position.
 
 ### 4. AniList sync
 
 One-way Shoko -> AniList.
 
-- Token: implicit grant. `shokod anilist login` prints the
-  `anilist.co/api/v2/oauth/authorize?client_id=...&response_type=token` URL,
-  user pastes token back. Stored `0600`.
+- Token: implicit grant, no code. Create an API client at
+  anilist.co/settings/developer (redirect `https://anilist.co/api/v2/oauth/pin`),
+  open `https://anilist.co/api/v2/oauth/authorize?client_id=<ID>&response_type=token`,
+  paste token into `ANILIST_TOKEN`. Token lives ~1 year.
 - Mapping: AniDB series id -> AniList id via Fribb/anime-lists
-  `anime-list-full.json`, cached `~/.cache/shokod/`, refreshed weekly.
-- Progress = highest N such that eps 1..N all watched (contiguous). AniDB
-  specials ignored. N == episode count -> `COMPLETED`, else `CURRENT`.
-- Triggers: event from module 3 (debounced 10s/series, one
-  `SaveMediaListEntry`), and `shokod anilist sync` one-shot: paginated
-  `MediaListCollection` pull, push only where Shoko is ahead. Never lowers
-  AniList progress.
+  `anime-list-full.json`, cached `~/.cache/shokod-anime-list.json`, refreshed weekly.
+- Progress = highest watched ep number where every lower ep *that has a file*
+  is watched (missing early eps assumed seen elsewhere). AniDB specials
+  ignored. progress >= AniList episode count -> `COMPLETED`, else `CURRENT`.
+- Triggers: after each watched mark (module 3), and `shokod anilist-sync`
+  one-shot over all Shoko series. Per series: one `Media{mediaListEntry}`
+  query, one `SaveMediaListEntry` only if Shoko is ahead. Never lowers
+  AniList progress -> rewatching a COMPLETED series is a no-op.
 
 ## Config
 
@@ -114,7 +119,7 @@ Flags with env fallback, no config lib:
 ```
 -listen     127.0.0.1:7373   SHOKOD_LISTEN
 -shoko      http://poco:8111 SHOKO_URL
--shoko-key                   SHOKO_APIKEY     (from POST /api/auth once, see `shokod login`)
+-shoko-key                   SHOKO_APIKEY     (Shoko WebUI -> settings -> API keys)
 -watched-at 85               (flag only)
 -sp-host    syncplay.pl:8997 SYNCPLAY_HOST
 -sp-room                     SYNCPLAY_ROOM
@@ -122,27 +127,27 @@ Flags with env fallback, no config lib:
 -anilist-token               ANILIST_TOKEN
 ```
 
+Handy: keep secrets in `~/.config/shokod.env` (0600) and run
+`set -a; . ~/.config/shokod.env; set +a; shokod`.
+
 ## Build
 
 ```sh
 make            # ./dist/shokod-linux-amd64 -linux-arm64 -windows-amd64.exe
 ```
 
-## Order of work
+## Status
 
-1. module 1: Shoko client + playlist + proxy + syncplay spawn. Test with curl.
-2. module 2: userscript. Now the goal flow works end to end.
-3. module 3: watched -> Shoko.
-4. module 4: AniList.
+All four modules built and verified live (2026-09-17). Remaining: real-world
+use, then whatever annoys.
 
 ## Later / maybe
 
 - Shoko reachable over private VPN: nothing changes here, `SHOKO_URL` just
   points at the VPN address. Proxy still needed (api key).
 
-## Open / verify against live Shoko
+## Verified against live Shoko 5.3.3
 
-- exact v3 stream endpoint (`File/{id}/Stream` vs `StreamDirectory`) and
-  whether `apikey` query/header is accepted there; whether it honors Range.
-- episode type field for filtering specials.
-- `--load-playlist-from-file` start index behaviour (rotate list vs `--file`).
+- `File/{id}/Stream` accepts `apikey` header or query, honors Range (206).
+- `includeDataFrom=AniDB` gives `AniDB.Type` / `AniDB.EpisodeNumber`; `pageSize=0` = all.
+- `File/{id}/Watched/{bool}` path param; query form is ignored.

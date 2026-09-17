@@ -30,14 +30,15 @@ func env(key, def string) string {
 }
 
 var (
-	listen    = flag.String("listen", env("SHOKOD_LISTEN", "127.0.0.1:7373"), "listen address")
-	shokoURL  = flag.String("shoko", env("SHOKO_URL", "http://127.0.0.1:8111"), "Shoko Server URL")
-	shokoKey  = flag.String("shoko-key", env("SHOKO_APIKEY", ""), "Shoko API key")
-	spHost    = flag.String("sp-host", env("SYNCPLAY_HOST", ""), "syncplay host:port (default: syncplay.ini)")
-	spRoom    = flag.String("sp-room", env("SYNCPLAY_ROOM", ""), "syncplay room (default: syncplay.ini)")
-	spName    = flag.String("sp-name", env("SYNCPLAY_NAME", ""), "syncplay username (default: syncplay.ini)")
-	watchedAt = flag.Float64("watched-at", 85, "mark watched in Shoko at this percent-pos")
-	runDir    = env("XDG_RUNTIME_DIR", os.TempDir())
+	listen       = flag.String("listen", env("SHOKOD_LISTEN", "127.0.0.1:7373"), "listen address")
+	shokoURL     = flag.String("shoko", env("SHOKO_URL", "http://127.0.0.1:8111"), "Shoko Server URL")
+	shokoKey     = flag.String("shoko-key", env("SHOKO_APIKEY", ""), "Shoko API key")
+	spHost       = flag.String("sp-host", env("SYNCPLAY_HOST", ""), "syncplay host:port (default: syncplay.ini)")
+	spRoom       = flag.String("sp-room", env("SYNCPLAY_ROOM", ""), "syncplay room (default: syncplay.ini)")
+	spName       = flag.String("sp-name", env("SYNCPLAY_NAME", ""), "syncplay username (default: syncplay.ini)")
+	watchedAt    = flag.Float64("watched-at", 85, "mark watched in Shoko at this percent-pos")
+	anilistToken = flag.String("anilist-token", env("ANILIST_TOKEN", ""), "AniList access token (implicit grant)")
+	runDir       = env("XDG_RUNTIME_DIR", os.TempDir())
 )
 
 type episode struct {
@@ -51,16 +52,27 @@ type episode struct {
 	Watched *string
 }
 
-func seriesEpisodes(seriesID int) ([]episode, error) {
+func allEpisodes(seriesID int) ([]episode, error) {
 	var page struct{ List []episode }
 	err := shokoGet(fmt.Sprintf("/api/v3/Series/%d/Episode?pageSize=0&includeFiles=true&includeDataFrom=AniDB", seriesID), &page)
 	var eps []episode
 	for _, e := range page.List {
-		if e.AniDB.Type == "Episode" && len(e.Files) > 0 {
+		if e.AniDB.Type == "Episode" {
 			eps = append(eps, e)
 		}
 	}
 	sort.Slice(eps, func(i, j int) bool { return eps[i].AniDB.EpisodeNumber < eps[j].AniDB.EpisodeNumber })
+	return eps, err
+}
+
+func seriesEpisodes(seriesID int) ([]episode, error) {
+	all, err := allEpisodes(seriesID)
+	var eps []episode
+	for _, e := range all {
+		if len(e.Files) > 0 {
+			eps = append(eps, e)
+		}
+	}
 	return eps, err
 }
 
@@ -174,6 +186,123 @@ func markWatched(fileID string) {
 		err = fmt.Errorf("%s", res.Status)
 	}
 	log.Printf("watched file %s: %v", fileID, err)
+	var eps []episode
+	if shokoGet("/api/v3/File/"+fileID+"/Episode", &eps) == nil && len(eps) > 0 {
+		syncAnilist(eps[0].IDs.ParentSeries)
+	}
+}
+
+var (
+	anidbToAnilist map[int]int
+	mapOnce        sync.Once
+)
+
+func anilistID(anidb int) int {
+	mapOnce.Do(func() {
+		cache := filepath.Join(env("XDG_CACHE_HOME", filepath.Join(os.Getenv("HOME"), ".cache")), "shokod-anime-list.json")
+		st, err := os.Stat(cache)
+		if err != nil || time.Since(st.ModTime()) > 7*24*time.Hour {
+			res, err := http.Get("https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json")
+			if err == nil && res.StatusCode == 200 {
+				b, _ := io.ReadAll(res.Body)
+				os.WriteFile(cache, b, 0o644)
+			}
+		}
+		b, _ := os.ReadFile(cache)
+		var list []struct {
+			AniDB   int `json:"anidb_id"`
+			AniList int `json:"anilist_id"`
+		}
+		json.Unmarshal(b, &list)
+		anidbToAnilist = map[int]int{}
+		for _, x := range list {
+			anidbToAnilist[x.AniDB] = x.AniList
+		}
+	})
+	return anidbToAnilist[anidb]
+}
+
+func anilistQuery(query string, vars map[string]any, out any) error {
+	body, _ := json.Marshal(map[string]any{"query": query, "variables": vars})
+	req, _ := http.NewRequest("POST", "https://graphql.anilist.co", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+*anilistToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	var env struct {
+		Data   json.RawMessage
+		Errors []struct{ Message string }
+	}
+	if err := json.NewDecoder(res.Body).Decode(&env); err != nil {
+		return err
+	}
+	if len(env.Errors) > 0 {
+		return errors.New(env.Errors[0].Message)
+	}
+	return json.Unmarshal(env.Data, out)
+}
+
+// progress = highest watched ep number where every lower ep that has a file is watched.
+func shokoProgress(eps []episode) int {
+	n := 0
+	for _, e := range eps {
+		if e.Watched != nil {
+			n = e.AniDB.EpisodeNumber
+		} else if len(e.Files) > 0 {
+			break
+		}
+	}
+	return n
+}
+
+func syncAnilist(seriesID int) {
+	if *anilistToken == "" {
+		return
+	}
+	var series struct {
+		Name string
+		IDs  struct{ AniDB int }
+	}
+	eps, err := allEpisodes(seriesID)
+	if err == nil {
+		err = shokoGet(fmt.Sprintf("/api/v3/Series/%d", seriesID), &series)
+	}
+	if err != nil {
+		log.Print("anilist: ", err)
+		return
+	}
+	progress, alID := shokoProgress(eps), anilistID(series.IDs.AniDB)
+	if progress == 0 || alID == 0 {
+		log.Printf("anilist: %s skip (progress %d, anilist id %d)", series.Name, progress, alID)
+		return
+	}
+	var m struct {
+		Media struct {
+			Episodes       int
+			MediaListEntry *struct {
+				Progress int
+				Status   string
+			}
+		}
+	}
+	if err := anilistQuery(`query($id:Int){Media(id:$id){episodes mediaListEntry{progress status}}}`, map[string]any{"id": alID}, &m); err != nil {
+		log.Print("anilist: ", err)
+		return
+	}
+	if e := m.Media.MediaListEntry; e != nil && e.Progress >= progress {
+		log.Printf("anilist: %s already at %d", series.Name, e.Progress)
+		return
+	}
+	status := "CURRENT"
+	if m.Media.Episodes > 0 && progress >= m.Media.Episodes {
+		status = "COMPLETED"
+	}
+	err = anilistQuery(`mutation($id:Int,$p:Int,$s:MediaListStatus){SaveMediaListEntry(mediaId:$id,progress:$p,status:$s){id}}`,
+		map[string]any{"id": alID, "p": progress, "s": status}, &struct{}{})
+	log.Printf("anilist: %s -> %d %s: %v", series.Name, progress, status, err)
 }
 
 func watchMpv() {
@@ -210,6 +339,18 @@ func main() {
 	shoko, err := url.Parse(*shokoURL)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if flag.Arg(0) == "anilist-sync" {
+		var page struct {
+			List []struct{ IDs struct{ ID int } }
+		}
+		if err := shokoGet("/api/v3/Series?pageSize=0", &page); err != nil {
+			log.Fatal(err)
+		}
+		for _, s := range page.List {
+			syncAnilist(s.IDs.ID)
+		}
+		return
 	}
 
 	proxy := &httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
