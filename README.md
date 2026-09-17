@@ -41,6 +41,8 @@ HTTP API only. No mounts, no path mapping.
 
 ```
 cmd/shokod/main.go          everything daemon-side, one file until it hurts
+cmd/shokod/main_test.go     progress rule + playlist rotation
+shokod.service              systemd --user unit
 userscript/shoko-syncplay.user.js
 Makefile                    static builds: linux/amd64, linux/arm64, windows/amd64
 ```
@@ -127,14 +129,16 @@ Flags with env fallback, no config lib:
 -anilist-token               ANILIST_TOKEN
 ```
 
-Handy: keep secrets in `~/.config/shokod.env` (0600) and run
-`set -a; . ~/.config/shokod.env; set +a; shokod`.
-
-## Build
+## Build / install / test
 
 ```sh
 make            # ./dist/shokod-linux-amd64 -linux-arm64 -windows-amd64.exe
+make test
+make install    # ~/.local/bin/shokod + systemd --user unit, reads ~/.config/shokod.env
+journalctl --user -u shokod -f
 ```
+`~/.config/shokod.env` (0600): `SHOKO_URL=`, `SHOKO_APIKEY=`, `ANILIST_TOKEN=`,
+optional `SYNCPLAY_*`.
 
 ## Status
 

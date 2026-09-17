@@ -105,12 +105,7 @@ func playlist(episodeID int, mode string) ([]string, error) {
 		if eps, err = seriesEpisodes(ep.IDs.ParentSeries); err != nil {
 			return nil, err
 		}
-		for i, e := range eps {
-			if e.IDs.ID == episodeID {
-				eps = append(eps[i:], eps[:i]...)
-				break
-			}
-		}
+		eps = startAt(eps, episodeID)
 	}
 	var out []string
 	for _, e := range eps {
@@ -121,6 +116,15 @@ func playlist(episodeID int, mode string) ([]string, error) {
 		out = append(out, fmt.Sprintf("http://%s/stream/%d/%s", *listen, e.Files[0].ID, url.PathEscape(name)))
 	}
 	return out, nil
+}
+
+func startAt(eps []episode, episodeID int) []episode {
+	for i, e := range eps {
+		if e.IDs.ID == episodeID {
+			return append(eps[i:], eps[:i]...)
+		}
+	}
+	return eps
 }
 
 var (

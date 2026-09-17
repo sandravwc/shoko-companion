@@ -1,0 +1,11 @@
+[Unit]
+Description=Shoko companion daemon (syncplay/mpv launcher, watched sync)
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/shokod.env
+ExecStart=%h/.local/bin/shokod
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
