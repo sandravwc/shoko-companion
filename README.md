@@ -14,19 +14,19 @@ HTTP API only. No mounts, no path mapping.
 4. Watched state flows back: mpv -> Shoko -> AniList.
 
 ```
-          workstation (this repo runs here)
- ┌──────────────────────────────────────────────┐
- │ browser ──userscript──► shokod :7373 (lo)     │   http    ┌────────────────────┐
- │                          │   │   │            │ ◄───────► │ Shoko Server (poco)│
- │                          │   │   stream proxy │ /api/v3   └────────────────────┘
- │                          │   └── mpv (ipc)    │
- │                          │        ▲           │           ┌────────────────────┐
- │                          └── syncplay client ─┼─────────► │ syncplay server    │
- │                              (official, ini)  │           │ (anywhere, e.g.    │
- │                                               │           │  syncplay.pl)      │
- │                            anilist module ────┼─────────► api.anilist.co       │
- └──────────────────────────────────────────────┘           └────────────────────┘
-                                                   friends: plain syncplay ──► same server
+  workstation (this repo runs here)                                                      
+ ┌──────────────────────────────────────────────┐                                        
+ │ browser ──userscript──► shokod :7373 (lo)    │   http    ┌────────────────────┐       
+ │                          │   │   │           │ ◄───────► │ Shoko Server (poco)│       
+ │                          │   │   stream proxy│ /api/v3   └────────────────────┘       
+ │                          │   └── mpv (ipc)   │                                        
+ │                          │        ▲          │           ┌────────────────────┐       
+ │                          └── syncplay client ┼─────────► │ syncplay server    │       
+ │                              (official, ini) │           │ (anywhere, e.g.    │       
+ │                                              │           │  syncplay.pl)      │       
+ │                            anilist module ───┼─────────► api.anilist.co       │       
+ └──────────────────────────────────────────────┘           └────────────────────┘       
+                                                  friends: plain syncplay ──► same server
 ```
 
 ## Why Go
