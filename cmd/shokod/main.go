@@ -149,7 +149,7 @@ func launch(entries []string) error {
 			args = append(args, f, v)
 		}
 	}
-	args = append(args, entries[0], "--", "--input-ipc-server="+filepath.Join(runDir, "shokod-mpv.sock"))
+	args = append(args, "--", "--input-ipc-server="+filepath.Join(runDir, "shokod-mpv.sock"))
 	spCmd = exec.Command("syncplay", args...)
 	spCmd.Stdout, spCmd.Stderr = os.Stdout, os.Stderr
 	log.Printf("exec syncplay %q", args)
@@ -249,14 +249,12 @@ func anilistQuery(query string, vars map[string]any, out any) error {
 	return json.Unmarshal(env.Data, out)
 }
 
-// progress = highest watched ep number where every lower ep that has a file is watched.
+// progress = highest watched ep number, like every tracker scrobbler does.
 func shokoProgress(eps []episode) int {
 	n := 0
 	for _, e := range eps {
-		if e.Watched != nil {
+		if e.Watched != nil && e.AniDB.EpisodeNumber > n {
 			n = e.AniDB.EpisodeNumber
-		} else if len(e.Files) > 0 {
-			break
 		}
 	}
 	return n

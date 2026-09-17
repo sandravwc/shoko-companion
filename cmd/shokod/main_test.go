@@ -22,9 +22,8 @@ func TestShokoProgress(t *testing.T) {
 		want int
 	}{
 		{"none", []episode{ep(1, 1, true, false)}, 0},
-		{"missing early eps skipped", []episode{ep(1, 1, false, false), ep(2, 2, false, false), ep(3, 3, true, true)}, 3},
-		{"gap with file stops", []episode{ep(1, 1, true, true), ep(2, 2, true, false), ep(3, 3, true, true)}, 1},
-		{"all", []episode{ep(1, 1, true, true), ep(2, 2, true, true)}, 2},
+		{"gaps ignored", []episode{ep(1, 1, true, true), ep(2, 2, true, false), ep(6, 6, true, true)}, 6},
+		{"unsorted", []episode{ep(6, 6, true, true), ep(3, 3, true, true)}, 6},
 	}
 	for _, c := range cases {
 		if got := shokoProgress(c.eps); got != c.want {

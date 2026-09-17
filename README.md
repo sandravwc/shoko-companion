@@ -62,7 +62,7 @@ Makefile                    static builds: linux/amd64, linux/arm64, windows/amd
   leak the api key. Readable name in the path is what friends see.
 - Write `$XDG_RUNTIME_DIR/shokod.m3u`, spawn
   `syncplay --no-gui --player-path mpv --load-playlist-from-file shokod.m3u
-   [-a H -r R -n N] <first entry> -- --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock`.
+   [-a H -r R -n N] -- --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock`.
   Host/room/name fall back to syncplay.ini when flags unset. `--` is required
   before mpv args. If syncplay already running: kill + respawn (lazy; replace
   with playlist-append later if it annoys).
@@ -106,9 +106,8 @@ One-way Shoko -> AniList.
   paste token into `ANILIST_TOKEN`. Token lives ~1 year.
 - Mapping: AniDB series id -> AniList id via Fribb/anime-lists
   `anime-list-full.json`, cached `~/.cache/shokod-anime-list.json`, refreshed weekly.
-- Progress = highest watched ep number where every lower ep *that has a file*
-  is watched (missing early eps assumed seen elsewhere). AniDB specials
-  ignored. progress >= AniList episode count -> `COMPLETED`, else `CURRENT`.
+- Progress = highest watched ep number (gaps ignored, like any scrobbler).
+  AniDB specials ignored. progress >= AniList episode count -> `COMPLETED`, else `CURRENT`.
 - Triggers: after each watched mark (module 3), and `shokod anilist-sync`
   one-shot over all Shoko series. Per series: one `Media{mediaListEntry}`
   query, one `SaveMediaListEntry` only if Shoko is ahead. Never lowers
