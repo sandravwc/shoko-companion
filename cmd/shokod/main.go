@@ -35,11 +35,26 @@ var (
 
 type episode struct {
 	IDs   struct{ ID, ParentSeries int }
+	Name  string
 	AniDB struct {
 		Type          string
 		EpisodeNumber int
 	}
-	Files []struct{ ID int }
+	Files   []struct{ ID int }
+	Watched *string
+}
+
+func seriesEpisodes(seriesID int) ([]episode, error) {
+	var page struct{ List []episode }
+	err := shokoGet(fmt.Sprintf("/api/v3/Series/%d/Episode?pageSize=0&includeFiles=true&includeDataFrom=AniDB", seriesID), &page)
+	var eps []episode
+	for _, e := range page.List {
+		if e.AniDB.Type == "Episode" && len(e.Files) > 0 {
+			eps = append(eps, e)
+		}
+	}
+	sort.Slice(eps, func(i, j int) bool { return eps[i].AniDB.EpisodeNumber < eps[j].AniDB.EpisodeNumber })
+	return eps, err
 }
 
 func shokoGet(path string, out any) error {
@@ -67,17 +82,10 @@ func playlist(episodeID int, mode string) ([]string, error) {
 	}
 	eps := []episode{ep}
 	if mode == "series" {
-		var page struct{ List []episode }
-		if err := shokoGet(fmt.Sprintf("/api/v3/Series/%d/Episode?pageSize=0&includeFiles=true&includeDataFrom=AniDB", ep.IDs.ParentSeries), &page); err != nil {
+		var err error
+		if eps, err = seriesEpisodes(ep.IDs.ParentSeries); err != nil {
 			return nil, err
 		}
-		eps = eps[:0]
-		for _, e := range page.List {
-			if e.AniDB.Type == "Episode" && len(e.Files) > 0 {
-				eps = append(eps, e)
-			}
-		}
-		sort.Slice(eps, func(i, j int) bool { return eps[i].AniDB.EpisodeNumber < eps[j].AniDB.EpisodeNumber })
 		for i, e := range eps {
 			if e.IDs.ID == episodeID {
 				eps = append(eps[i:], eps[:i]...)
@@ -141,10 +149,36 @@ func main() {
 		r.Out.Header.Set("apikey", *shokoKey)
 	}}
 
+	cors := func(w http.ResponseWriter) {
+		w.Header().Set("Access-Control-Allow-Origin", shoko.Scheme+"://"+shoko.Host)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /stream/{id}/{name}", proxy)
+	mux.HandleFunc("GET /episodes", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		var id int
+		if _, err := fmt.Sscan(r.FormValue("series"), &id); err != nil {
+			http.Error(w, "series=<id> required", 400)
+			return
+		}
+		eps, err := seriesEpisodes(id)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		type row struct {
+			ID, Number int
+			Name       string
+			Watched    bool
+		}
+		rows := []row{}
+		for _, e := range eps {
+			rows = append(rows, row{e.IDs.ID, e.AniDB.EpisodeNumber, e.Name, e.Watched != nil})
+		}
+		json.NewEncoder(w).Encode(rows)
+	})
 	mux.HandleFunc("GET /syncplay", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", shoko.Scheme+"://"+shoko.Host)
+		cors(w)
 		var id int
 		if _, err := fmt.Sscan(r.FormValue("episode"), &id); err != nil {
 			http.Error(w, "episode=<id> required", 400)
