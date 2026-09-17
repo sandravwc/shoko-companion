@@ -36,12 +36,7 @@ HTTP API only. No mounts, no path mapping.
 ## Layout (single repo)
 
 ```
-cmd/shokod/main.go          flags/env, HTTP server on 127.0.0.1:7373, wires modules
-internal/shoko/             v3 API client: auth, series/episode/file lookup, watched, stream
-internal/syncplay/          build playlist file, spawn `syncplay --no-gui ... mpv`
-internal/mpv/               poll percent-pos over --input-ipc-server, fire watched events
-internal/anilist/           GraphQL client, MediaListCollection import, SaveMediaListEntry
-internal/anilist/mapping/   Fribb/anime-lists anime-list-full.json loader (anidb -> anilist)
+cmd/shokod/main.go          everything daemon-side, one file until it hurts
 userscript/shoko-play-in-mpv.user.js
 Makefile                    static builds: linux/amd64, linux/arm64, windows/amd64
 ```
@@ -60,10 +55,13 @@ Makefile                    static builds: linux/amd64, linux/arm64, windows/amd
   Reason: syncplay broadcasts the path to the room; the real Shoko URL would
   leak the api key. Readable name in the path is what friends see.
 - Write `$XDG_RUNTIME_DIR/shokod.m3u`, spawn
-  `syncplay --no-gui --host H --room R --name N --player-path mpv
-   --load-playlist-from-file shokod.m3u -- --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock`.
-  If syncplay already running: kill + respawn (lazy; replace with
-  playlist-append later if it annoys).
+  `syncplay --no-gui --player-path mpv --load-playlist-from-file shokod.m3u
+   [-a H -r R -n N] <first entry> -- --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock`.
+  Host/room/name fall back to syncplay.ini when flags unset. `--` is required
+  before mpv args. If syncplay already running: kill + respawn (lazy; replace
+  with playlist-append later if it annoys).
+- Verified live: proxy streams with Range, syncplay opens entry 1, advances
+  to entry 2 at end-of-file, mpv IPC socket answers on our path.
 - Friends with plain Syncplay: they see the playlist names, open their own
   file by hand. Play/pause/seek sync works regardless; Syncplay only *warns*
   on name/size/duration mismatch. Auto-advance won't work for them (127.0.0.1
