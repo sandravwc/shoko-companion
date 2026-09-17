@@ -5,6 +5,14 @@ Go binary (`shokod`) + one browser userscript. Not a Shoko .NET plugin: runs on
 the *client* machine (the one with mpv/syncplay), talks to Shoko over its v3
 HTTP API only. No mounts, no path mapping.
 
+## Goal
+
+1. User opens Shoko WebUI, clicks an episode -> button "ep" or "series".
+2. Syncplay + mpv open. "ep" = that one episode. "series" = playlist of every
+   episode of the series that has a file, starting at the clicked one.
+3. Friends join the Syncplay room with plain Syncplay, no Shoko, no daemon.
+4. Watched state flows back: mpv -> Shoko -> AniList.
+
 ```
           workstation (this repo runs here)                 poco (proot-debian)
  ┌──────────────────────────────────────────────┐        ┌──────────────────┐
@@ -21,91 +29,81 @@ HTTP API only. No mounts, no path mapping.
 
 - `CGO_ENABLED=0 go build` = one static binary, no runtime. Cross-compiles to
   linux/arm64 (termux/proot) and windows with two env vars.
-- Everything needed is stdlib: `net/http` (Shoko/AniList), `net` unix socket
-  (mpv JSON IPC), `os/exec` (mpv, syncplay), `encoding/json`.
-- Rejected: Rust (slower iteration, same result), Python (no static build,
-  needs a runtime on every box).
+- Everything needed is stdlib: `net/http` (Shoko/AniList/proxy), `net` unix
+  socket (mpv JSON IPC), `os/exec` (syncplay), `encoding/json`.
+- Rejected: Rust (slower iteration, same result), Python (no static build).
 
 ## Layout (single repo)
 
 ```
 cmd/shokod/main.go          flags/env, HTTP server on 127.0.0.1:7373, wires modules
-internal/shoko/             v3 API client: auth, episode/file lookup, watched, stream URL
-internal/mpv/               spawn mpv --input-ipc-server, poll percent-pos, observe end-file
-internal/syncplay/          spawn `syncplay --no-gui`, parse stdout, resolve room file, chat hints
+internal/shoko/             v3 API client: auth, series/episode/file lookup, watched, stream
+internal/syncplay/          build playlist file, spawn `syncplay --no-gui ... mpv`
+internal/mpv/               poll percent-pos over --input-ipc-server, fire watched events
 internal/anilist/           GraphQL client, MediaListCollection import, SaveMediaListEntry
-internal/anilist/mapping/   Fribb/anime-lists anime-list-full.json loader (anidb -> anilist), disk cached
+internal/anilist/mapping/   Fribb/anime-lists anime-list-full.json loader (anidb -> anilist)
 userscript/shoko-play-in-mpv.user.js
 Makefile                    static builds: linux/amd64, linux/arm64, windows/amd64
 ```
 
 ## Modules
 
-### 1. mpv control (`/play`)
+### 1. Syncplay launch + stream proxy
 
-- `GET /play?file=<shokoFileID>` (or `?episode=<shokoEpisodeID>` -> first file).
-- Daemon starts `mpv --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock <url>`.
-  Reuses running mpv via `loadfile` if socket alive.
-- `<url>` is the **local stream proxy** `http://127.0.0.1:7373/stream/<fileID>/<Series - 05.mkv>`.
-  Proxy forwards to `SHOKO/api/v3/File/<id>/Stream` and injects `apikey`.
-  Reason: mpv/syncplay broadcast the path to the room; the real Shoko URL would
-  leak the api key. Proxy path also gives peers a readable filename.
-- Every 5s: `get_property percent-pos`. `>= 85%` (flag `-watched-at`) ->
-  `POST /api/v3/File/<id>/Watched?watched=true` once. Also emits event to
-  AniList module.
-- v2 (skip for now): `File/<id>/Scrobble` for resume position.
+- `GET /syncplay?episode=<shokoEpisodeID>&mode=ep|series`
+- series mode: `GET /api/v3/Series/<id>/Episode?includeFiles=true`, keep
+  episodes with >=1 file, sorted by episode number, rotate so clicked one is
+  first. ep mode: just that one.
+- Playlist entries are **local proxy URLs**
+  `http://127.0.0.1:7373/stream/<fileID>/<Series - 05.mkv>`. Proxy forwards to
+  `SHOKO/api/v3/File/<id>/Stream` and injects `apikey` server-side.
+  Reason: syncplay broadcasts the path to the room; the real Shoko URL would
+  leak the api key. Readable name in the path is what friends see.
+- Write `$XDG_RUNTIME_DIR/shokod.m3u`, spawn
+  `syncplay --no-gui --host H --room R --name N --player-path mpv
+   --load-playlist-from-file shokod.m3u -- --input-ipc-server=$XDG_RUNTIME_DIR/shokod-mpv.sock`.
+  If syncplay already running: kill + respawn (lazy; replace with
+  playlist-append later if it annoys).
+- Friends with plain Syncplay: they see the playlist names, open their own
+  file by hand. Play/pause/seek sync works regardless; Syncplay only *warns*
+  on name/size/duration mismatch. Auto-advance won't work for them (127.0.0.1
+  URL is unplayable on their box). Accepted.
+- Solo watching = room of one. No separate mpv-only path.
+- Syncplay config needs `127.0.0.1` in `trustedDomains` so it opens the proxy
+  URLs without prompting. Daemon prints the ini snippet on first run.
 
-### 2. Syncplay (model 2)
+### 2. WebUI userscript
 
-Constraint: peers may run plain Syncplay with no Shoko and no daemon. So the
-official `syncplay` client stays the sync engine, unmodified. Daemon only
-(a) picks the local file and (b) listens.
+`userscript/shoko-play-in-mpv.user.js` (Violentmonkey/Tampermonkey).
+Two small buttons per episode row in Shoko WebUI: "ep", "series" ->
+`fetch('http://127.0.0.1:7373/syncplay?episode=<id>&mode=...')`.
+Daemon answers CORS `Access-Control-Allow-Origin: <SHOKO_URL origin>`.
+Chrome Private Network Access may need
+`chrome://flags/#block-insecure-private-network-requests` off; Firefox fine.
 
-- `GET /syncplay?file=<id>` -> spawn
-  `syncplay --no-gui --host H --room R --name N --player-path mpv --file <proxy url> -- --input-ipc-server=...`.
-  mpv IPC observation (module 1) works the same, so watched state flows too.
-- Daemon reads syncplay stdout. Line `"<user> is playing '<name>' (<size>)"`
-  = room switched file. Resolution order:
-  1. Chat hint `shoko:anidb-ep=<id>` posted by a daemon-equipped peer -> exact.
-     Plain peers just see one harmless chat line.
-  2. Filename parse (series title + ep number, regex, anitomy-style) ->
-     `GET /api/v3/Series/Search/<title>` + episode number -> Shoko file.
-  3. No match -> log + OSD text via mpv `show-text`, user picks manually
-     (`/play`). Nothing breaks, syncplay keeps working on whatever mpv has.
-- Match found -> `loadfile` in the running mpv (syncplay follows, it watches
-  mpv's `path`). Post our own chat hint after switching.
-- Release differences: Syncplay only *warns* on name/size/duration mismatch,
-  never blocks. Set `filenamePrivacyMode` untouched; size from proxy is
-  `Content-Length` of the real file so it's honest, just different.
+### 3. Watched -> Shoko
 
-### 3. AniList sync
+- Every 5s over mpv IPC: `get_property path` + `percent-pos`. Path tells which
+  fileID is playing (parsed from the proxy URL), so playlist advance is free.
+- `percent-pos >= 85` (flag `-watched-at`) -> `POST /api/v3/File/<id>/Watched?watched=true`
+  once per file. Emits event to AniList module.
+- v2 (skip): `File/<id>/Scrobble` for resume position.
+
+### 4. AniList sync
 
 One-way Shoko -> AniList.
 
 - Token: implicit grant. `shokod anilist login` prints the
   `anilist.co/api/v2/oauth/authorize?client_id=...&response_type=token` URL,
-  user pastes token back. Stored in config file, `0600`.
+  user pastes token back. Stored `0600`.
 - Mapping: AniDB series id -> AniList id via Fribb/anime-lists
-  `anime-list-full.json`, downloaded on first use, cached `~/.cache/shokod/`,
-  refreshed weekly.
-- Progress rule: `progress = highest N such that eps 1..N are all watched`
-  (contiguous). AniDB specials (type != regular) ignored. If N == series
-  episode count -> `status: COMPLETED`, else `CURRENT`.
-- Triggers:
-  - event from module 1 after marking watched (debounced 10s per series,
-    one `SaveMediaListEntry` mutation).
-  - `shokod anilist sync` one-shot: paginated `MediaListCollection` pull,
-    diff against Shoko per-series watched state, push only where Shoko is ahead.
-    Never lowers AniList progress.
-
-### 4. WebUI userscript
-
-`userscript/shoko-play-in-mpv.user.js` (Violentmonkey/Tampermonkey).
-Injects a "mpv" button next to episodes/files in Shoko WebUI, calls
-`http://127.0.0.1:7373/play?file=<id>` (and a "syncplay" button -> `/syncplay`).
-Daemon answers CORS `Access-Control-Allow-Origin: <SHOKO_URL origin>`.
-Chrome Private Network Access may need
-`chrome://flags/#block-insecure-private-network-requests` off; Firefox fine.
+  `anime-list-full.json`, cached `~/.cache/shokod/`, refreshed weekly.
+- Progress = highest N such that eps 1..N all watched (contiguous). AniDB
+  specials ignored. N == episode count -> `COMPLETED`, else `CURRENT`.
+- Triggers: event from module 3 (debounced 10s/series, one
+  `SaveMediaListEntry`), and `shokod anilist sync` one-shot: paginated
+  `MediaListCollection` pull, push only where Shoko is ahead. Never lowers
+  AniList progress.
 
 ## Config
 
@@ -130,14 +128,19 @@ make            # ./dist/shokod-linux-amd64 -linux-arm64 -windows-amd64.exe
 
 ## Order of work
 
-1. `internal/shoko` + `/play` + stream proxy + watched POST  (module 1)
-2. userscript  (module 4, 50 lines, makes 1 usable)
-3. AniList  (module 3)
-4. Syncplay  (module 2, the novel part, builds on 1)
+1. module 1: Shoko client + playlist + proxy + syncplay spawn. Test with curl.
+2. module 2: userscript. Now the goal flow works end to end.
+3. module 3: watched -> Shoko.
+4. module 4: AniList.
 
-## Open / to verify against live Shoko
+## Later / maybe
+
+- Shoko reachable over private VPN: nothing changes here, `SHOKO_URL` just
+  points at the VPN address. Proxy still needed (api key).
+
+## Open / verify against live Shoko
 
 - exact v3 stream endpoint (`File/{id}/Stream` vs `StreamDirectory`) and
-  whether `apikey` query param is accepted there.
+  whether `apikey` query/header is accepted there; whether it honors Range.
 - episode type field for filtering specials.
-- `Series/Search` fuzziness good enough for filename titles.
+- `--load-playlist-from-file` start index behaviour (rotate list vs `--file`).
